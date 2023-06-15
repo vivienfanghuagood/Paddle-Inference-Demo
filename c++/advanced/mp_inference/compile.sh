@@ -5,6 +5,7 @@ set -e
 work_path=$(dirname $(readlink -f $0))
 
 # 2. compile
+rm -rf build
 mkdir -p build
 cd build
 

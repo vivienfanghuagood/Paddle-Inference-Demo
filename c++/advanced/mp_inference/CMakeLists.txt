@@ -56,6 +56,7 @@ link_directories("${PADDLE_LIB_THIRD_PARTY_PATH}xxhash/lib")
 link_directories("${PADDLE_LIB}/paddle/lib")
 link_directories("${PADDLE_LIB_THIRD_PARTY_PATH}onnxruntime/lib")
 link_directories("${PADDLE_LIB_THIRD_PARTY_PATH}paddle2onnx/lib")
+link_directories("/root/paddlejob/workspace/output/fhq_0324/nccl_multithread/Paddle/build/third_party/install/leveldb/lib/")
 
 if (WIN32)
   add_definitions("/DGOOGLE_GLOG_DLL_DECL=")
@@ -168,6 +169,8 @@ else()
   set(DEPS ${DEPS} shlwapi.lib)
 endif(NOT WIN32)
 
+set(DEPS ${DEPS} leveldb)
+
 if(WITH_GPU)
   if(NOT WIN32)
     if (USE_TENSORRT)
@@ -193,7 +196,7 @@ add_subdirectory(custom_ops)
 
 add_executable(${DEMO_NAME} ${DEMO_NAME}.cc)
 set(DEPS ${DEPS} pd_infer_custom_op)
-set(DEPS ${DEPS} cnpy)
+set(DEPS ${DEPS} cnpy ssl crypto)
 
 if(WIN32)
   if(USE_TENSORRT)
