@@ -31,6 +31,8 @@
 #include "glog/logging.h"
 #include "paddle/include/paddle_inference_api.h"
 #include "paddle/include/paddle_tensor.h"
+// #include "paddle/phi/common/bfloat16.h"
+#include "paddle/include/experimental/phi/common/bfloat16.h"
 // #include "paddle/include/experimental/phi/common/float16.h"
 
 #include "cnpy.h"
@@ -38,6 +40,7 @@
 using paddle_infer::Config;
 using paddle_infer::CreatePredictor;
 using paddle_infer::Predictor;
+using bfloat16 = phi::dtype::bfloat16;
 // using phi::dtype::float16;
 
 DEFINE_bool(use_multi_thread_inference, true, "whether use multi thread inference");
@@ -115,10 +118,10 @@ void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1) {
       float* data = arr_npy.data<float>();
       input_tmp->CopyFromCpu(data);
     }
-    // else if(input_types[name] == paddle_infer::DataType::BFLOAT16){
-    //   char* data = arr_npy.data<char>();
-    //   input_tmp->CopyFromCpu(data);
-    // }
+    else if(input_types[name] == paddle_infer::DataType::BFLOAT16){
+      void* data = arr_npy.data<void>();
+      input_tmp->CopyFromCpu(reinterpret_cast<bfloat16*>(data));
+    }
     else if(input_types[name] == paddle_infer::DataType::INT64){
       long* data = arr_npy.data<long>();
       input_tmp->CopyFromCpu(data);
@@ -186,7 +189,7 @@ int main(int argc, char *argv[]) {
   inference_attr attrs[FLAGS_dist_nrank];
   cnpy::npz_t input_npz = cnpy::npz_load(FLAGS_dump_input);
 
-  int64_t cache_nums = 2 * FLAGS_max_batch * max_seq_len * 64 / FLAGS_dist_nrank * 128;
+  int64_t cache_nums = 2 * FLAGS_max_batch * FLAGS_max_seq_len * 64 / FLAGS_dist_nrank * 128;
 
   for (int i = 0; i < FLAGS_dist_nrank; ++i) {
 
@@ -195,12 +198,12 @@ int main(int argc, char *argv[]) {
     attrs[i].model_file = FLAGS_model_dir  + "/rank_" + std::to_string(i) + "/model.pdmodel";
     attrs[i].params_file = FLAGS_model_dir  + "/rank_" + std::to_string(i) + "/model.pdiparams";
 
-    for(int i=0; i< FLAGS_layer_num; ++i){
-      char* cache_kv_buffer = nullptr;
-      cudaMalloc((void **) &cache_kv_buffer, cache_nums * sizeof(uint16_t));
-      std::string cache_key = "cache_kvs_" + std::to_string(i);
-      attrs[i].shared_buffer_map[cache_key] = static_cast<void*>(cache_kv_buffer);
-    }
+    // for(int i=0; i< FLAGS_layer_num; ++i){
+    //   char* cache_kv_buffer = nullptr;
+    //   cudaMalloc((void **) &cache_kv_buffer, cache_nums * sizeof(uint16_t));
+    //   std::string cache_key = "cache_kvs_" + std::to_string(i);
+    //   attrs[i].shared_buffer_map[cache_key] = static_cast<void*>(cache_kv_buffer);
+    // }
 
     // Set external stream
     cudaSetDevice(i);
