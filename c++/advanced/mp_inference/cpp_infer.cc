@@ -24,11 +24,16 @@
 #include <string>
 #include <pthread.h>
 #include <thread>
+#include <sstream>
+#include <stdexcept>
 
 #include <cuda_runtime.h>
 
 #include "gflags/gflags.h"
 #include "glog/logging.h"
+
+// #include "paddle/include/experimental/phi/common/bfloat16.h"
+#include "paddle/phi/common/bfloat16.h"
 #include "paddle/include/paddle_inference_api.h"
 #include "paddle/include/paddle_tensor.h"
 // #include "paddle/include/experimental/phi/common/float16.h"
@@ -38,10 +43,12 @@
 using paddle_infer::Config;
 using paddle_infer::CreatePredictor;
 using paddle_infer::Predictor;
+using bfloat16 = phi::dtype::bfloat16;
+using paddle_infer::PlaceType;
 // using phi::dtype::float16;
 
 DEFINE_bool(use_multi_thread_inference, true, "whether use multi thread inference");
-DEFINE_string(dump_input, "./dump_input.npz", "Directory of the dumped input npz file");
+DEFINE_string(dump_input, "./dump_input_dev.npz", "Directory of the dumped input npz file");
 DEFINE_string(model_file, "", "Directory of the inference model.");
 DEFINE_string(params_file, "", "Directory of the inference model.");
 DEFINE_string(model_dir, "", "Directory of the inference model.");
@@ -73,7 +80,7 @@ std::shared_ptr<Predictor> InitPredictor(std::string model_path, std::string par
   config.EnableMemoryOptim();
   config.SwitchIrOptim(true);
   config.SetCpuMathLibraryNumThreads(1);
-  if(device_id == 0){
+  if (device_id == 0){
     VLOG(0) << "[multi_thread] " << "device_id 0 ";
     config.SetUseMultiThreadInference(true);
     config.SetMultiThreadRingId(FLAGS_ring_id);
@@ -92,36 +99,75 @@ std::shared_ptr<Predictor> InitPredictor(std::string model_path, std::string par
   return CreatePredictor(config);
 }
 
-void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1) {
+void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1, inference_attr* args=nullptr) {
   // cnpy::npz_t input_npz = cnpy::npz_load(FLAGS_dump_input);
   auto input_names = predictor->GetInputNames();
   auto input_types = predictor->GetInputTypes();
-
   for (auto name : input_names) {
     auto input_tmp = predictor->GetInputHandle(name);
     auto input_tmp_shape = input_tmp->shape();
     cnpy::NpyArray arr_npy = input_npz[name];
-    std::vector<int> shape;
+    
     
     VLOG(3) <<  "[check input] input names:" <<  name;
-    for(size_t j=0; j < arr_npy.shape.size(); ++j){
+
+    if (name.find("cache_kv") != std::string::npos) {
+       VLOG(3) <<  "[check input] load cache" <<  name;
+
+      // 2 * FLAGS_max_batch * FLAGS_max_seq_len * 64 / FLAGS_dist_nrank * 128
+      auto cache_buffer =  static_cast<bfloat16*>(args->shared_buffer_map[name]);
+      std::vector<int> shape {2, FLAGS_max_batch, 8, 4096, 128};
+      input_tmp->ShareExternalData<bfloat16>(cache_buffer, shape, PlaceType::kGPU);
+      // input_tmp->Reshape(shape);
+      continue;
+    } else if (name.find("mask") != std::string::npos || name.find("position") != std::string::npos) {
+
+      // TODO
+    } else if (name.find("pre_id") != std::string::npos) {
+      long* pre_id_buffer = nullptr;
+      cudaMalloc((void **) &pre_id_buffer, FLAGS_max_batch * 4096 * sizeof(long));
+
+      long* pre_id_buffer_cpu = new long[FLAGS_max_batch * 4096];
+      for(int jj=0; jj< FLAGS_max_batch * 4096; ++jj){
+        pre_id_buffer_cpu[jj] = 0;
+      }
+      cudaMemcpy(pre_id_buffer, pre_id_buffer_cpu, FLAGS_max_batch * 4096, cudaMemcpyHostToDevice);
+      delete pre_id_buffer_cpu;
+
+      std::vector<int> shape {FLAGS_max_batch, 4096};
+      // input_tmp->Reshape(shape);
+      input_tmp->ShareExternalData<long>(pre_id_buffer, shape, PlaceType::kGPU);
+      continue;
+    }
+    
+    std::vector<int> shape;
+    for(size_t j = 0; j < arr_npy.shape.size(); ++j){
       shape.emplace_back(arr_npy.shape[j]);
       VLOG(3) <<  "[check shape]: " <<  arr_npy.shape[j];
     }
     VLOG(3) <<  "[check dtype] : " << input_types[name];
     input_tmp->Reshape(shape);
 
-    if(input_types[name] == paddle_infer::DataType::FLOAT32){
+
+    if (input_types[name] == paddle_infer::DataType::FLOAT32){
       float* data = arr_npy.data<float>();
       input_tmp->CopyFromCpu(data);
-    }
-    // else if(input_types[name] == paddle_infer::DataType::BFLOAT16){
-    //   char* data = arr_npy.data<char>();
-    //   input_tmp->CopyFromCpu(data);
-    // }
-    else if(input_types[name] == paddle_infer::DataType::INT64){
+    } else if (input_types[name] == paddle_infer::DataType::BFLOAT16){
+      void* data = arr_npy.data<void>();
+      input_tmp->CopyFromCpu(reinterpret_cast<bfloat16*>(data));
+    } else if (input_types[name] == paddle_infer::DataType::INT64){
       long* data = arr_npy.data<long>();
       input_tmp->CopyFromCpu(data);
+    } else if (input_types[name] == paddle_infer::DataType::INT32){
+      int* data = arr_npy.data<int>();
+      input_tmp->CopyFromCpu(data);
+    } else if (input_types[name] == paddle_infer::DataType::BOOL) {
+      bool *data = arr_npy.data<bool>();
+      input_tmp->CopyFromCpu(data);
+    } else {
+      std::stringstream error_info;
+      error_info << "Unsupported data type " << input_types[name] << " when get input dtype";
+      throw(std::invalid_argument(error_info.str()));
     }
   }
 
@@ -172,7 +218,7 @@ void *thread_fn(void *args) {
 
     VLOG(3) << "Thread:" << thread_idx << "  start run";
 
-    run_predict(predictor.get(), targs->input_npz, device_id);
+    run_predict(predictor.get(), targs->input_npz, device_id, targs);
 
     return nullptr;
 }
@@ -185,25 +231,31 @@ int main(int argc, char *argv[]) {
   pthread_t workers[FLAGS_dist_nrank];
   inference_attr attrs[FLAGS_dist_nrank];
   cnpy::npz_t input_npz = cnpy::npz_load(FLAGS_dump_input);
-
-  int64_t cache_nums = 2 * FLAGS_max_batch * max_seq_len * 64 / FLAGS_dist_nrank * 128;
+  int64_t cache_nums = 2 * FLAGS_max_batch * FLAGS_max_seq_len * 64 / FLAGS_dist_nrank * 128;
+  VLOG(5) << "cache_nums: " << cache_nums;
+  bfloat16* cache_kv_buffer_cpu = new bfloat16[cache_nums];
+  for(int jj=0; jj < cache_nums; ++jj){
+    cache_kv_buffer_cpu[jj] = 0;
+  }
 
   for (int i = 0; i < FLAGS_dist_nrank; ++i) {
-
+    VLOG(5) << "device: " << i;
+    cudaSetDevice(i);
     attrs[i].rank = i;
     attrs[i].device_id = dev_ids[i];
     attrs[i].model_file = FLAGS_model_dir  + "/rank_" + std::to_string(i) + "/model.pdmodel";
     attrs[i].params_file = FLAGS_model_dir  + "/rank_" + std::to_string(i) + "/model.pdiparams";
-
-    for(int i=0; i< FLAGS_layer_num; ++i){
-      char* cache_kv_buffer = nullptr;
-      cudaMalloc((void **) &cache_kv_buffer, cache_nums * sizeof(uint16_t));
-      std::string cache_key = "cache_kvs_" + std::to_string(i);
+    for(int layer_id = 0; layer_id < FLAGS_layer_num; ++layer_id){
+      // VLOG(4) << "layer:" << layer_id;
+      bfloat16* cache_kv_buffer = nullptr;
+      cudaMalloc((void **) &cache_kv_buffer, cache_nums * sizeof(bfloat16));
+      cudaMemcpy(cache_kv_buffer, cache_kv_buffer_cpu, cache_nums, cudaMemcpyHostToDevice);
+      
+      std::string cache_key = "cache_kvs_" + std::to_string(layer_id);
       attrs[i].shared_buffer_map[cache_key] = static_cast<void*>(cache_kv_buffer);
     }
 
-    // Set external stream
-    cudaSetDevice(i);
+    // Set external stream here
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     VLOG(3) << "[multi_thread] " << "stream 0 " << stream;
@@ -212,6 +264,7 @@ int main(int argc, char *argv[]) {
     // set input data
     attrs[i].input_npz = input_npz;
   }
+  delete cache_kv_buffer_cpu;
   
   for (int i = 0; i < FLAGS_dist_nrank; ++i) {
     pthread_create(&workers[i], nullptr, thread_fn, (void*)(&attrs[i]));
