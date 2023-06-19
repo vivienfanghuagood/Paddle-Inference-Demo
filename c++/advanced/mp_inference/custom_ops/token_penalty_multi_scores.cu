@@ -25,12 +25,55 @@ public:
   typedef paddle::bfloat16 data_t;
 };
 
+template<typename T>
+__global__ inline void min_length_logits_process(T* logits,
+                                                 const int64_t *cur_len,
+                                                 const int64_t *min_len,
+                                                 const int64_t *eos_token_id,
+                                                 const int64_t bs,
+                                                 const int64_t length,
+                                                 const int64_t end_length) {
+    int bi = blockIdx.x;
+    if (cur_len[bi] < 0) {
+        return;
+    }
+    if (cur_len[bi] < min_len[bi]) {
+        for (int i=0; i < end_length; i++) {
+            logits[bi * length + eos_token_id[i]] = -1e4;
+        }
+    }
+}
+
+template<>
+__global__ inline void min_length_logits_process<half>(half* logits,
+                                                       const int64_t *cur_len,
+                                                       const int64_t *min_len,
+                                                       const int64_t *eos_token_id,
+                                                       const int64_t bs,
+                                                       const int64_t length,
+                                                       const int64_t end_length) {
+    int bi = blockIdx.x;
+    if (cur_len[bi] < 0) {
+        return;
+    }
+    if (cur_len[bi] < min_len[bi]) {
+        for (int i=0; i < end_length; i++) {
+            logits[bi * length + eos_token_id[i]] = -1e4;
+        }
+    }
+}
+
+
 __global__ void update_repeat_times(const int64_t *pre_ids, 
+                                    const int64_t *cur_len,
                                     int *repeat_times, 
                                     const int64_t bs, 
                                     const int64_t length, 
                                     const int64_t length_id) {
     int bi = blockIdx.x;
+    if (cur_len[bi] < 0) {
+        return;
+    }
     int tid = threadIdx.x;
     const int64_t *pre_ids_now = pre_ids + bi * length_id;
     int *repeat_times_now = repeat_times + bi * length;
@@ -61,22 +104,11 @@ __global__ void update_value_by_repeat_times(const int *repeat_times,
         // printf("bi: %d, ti: %d, repeat_times: %d\n", bi, tid, times);
         if (times == 0) continue;
         float logit_now = static_cast<float>(logits_now[i]);
-        logit_now = static_cast<T>(logit_now < 0 ? logit_now * alpha : logit_now / alpha);
+        logit_now = logit_now < 0 ? logit_now * alpha : logit_now / alpha;
         logits_now[i] = static_cast<T>(logit_now - times * beta - gamma);
         // printf("bi: %d, ti: %d, repeat_times: %d, presence_score: %f, frequency_score: %f, presence_score: %f, logit_now: %f, logits: %f\n", 
                 // bi, tid, times, alpha, beta, gamma, (float)logit_now, (float)logits_now[i]);
     }
-}
-
-template<typename T>
-__global__ inline void min_length_logits_process(T* logits,
-                                                 const int64_t *cur_len,
-                                                 const int64_t *min_len,
-                                                 const int64_t *eos_token_id,
-                                                 const int64_t bs,
-                                                 const int64_t length) {
-    // printf("cur_len: %d, min_len: %d, eos_token_id: %d\n", static_cast<int>(cur_len[0]), static_cast<int>(min_len[0]), static_cast<int>(eos_token_id[0]));
-    if (cur_len[0] < min_len[0]) logits[blockIdx.x * length + eos_token_id[0]] = -1e38;
 }
 
 template <paddle::DataType D>
@@ -88,6 +120,7 @@ std::vector<paddle::Tensor> token_penalty_multi_scores_kernel(const paddle::Tens
                                                               const paddle::Tensor& cur_len,
                                                               const paddle::Tensor& min_len,
                                                               const paddle::Tensor& eos_token_id) {
+
     typedef PDTraits<D> traits_;
     typedef typename traits_::DataType DataType_;
     typedef typename traits_::data_t data_t;
@@ -99,16 +132,18 @@ std::vector<paddle::Tensor> token_penalty_multi_scores_kernel(const paddle::Tens
     int64_t length_id = pre_ids.shape()[1];
     auto logits_out = logits.copy_to(logits.place(), false); // gpu -> gpu
 
+    int64_t end_length = eos_token_id.shape()[0];
+
     min_length_logits_process<<<bs, 1, 0, cu_stream>>>(
         reinterpret_cast<DataType_*>(const_cast<data_t*>(logits_out.data<data_t>())),
         cur_len.data<int64_t>(),
 		min_len.data<int64_t>(),
 		eos_token_id.data<int64_t>(),
-		bs, length);
+		bs, length, end_length);
 
     int block_size_1 = (length_id + 32 - 1) / 32 * 32;
     block_size_1 = min(block_size_1, 512);
-    update_repeat_times<<<bs, block_size_1, 0, cu_stream>>>(pre_ids.data<int64_t>(), repeat_times.data<int>(), bs, length, length_id);
+    update_repeat_times<<<bs, block_size_1, 0, cu_stream>>>(pre_ids.data<int64_t>(), cur_len.data<int64_t>(), repeat_times.data<int>(), bs, length, length_id);
     int block_size_2 = (length + 32 - 1) / 32 * 32;
     block_size_2 = min(block_size_2, 512);
     update_value_by_repeat_times<DataType_><<<bs, block_size_2, 0, cu_stream>>>(
@@ -129,6 +164,7 @@ std::vector<paddle::Tensor> TokenPenaltyMultiScores(const paddle::Tensor& pre_id
                                                     const paddle::Tensor& cur_len,
                                                     const paddle::Tensor& min_len,
                                                     const paddle::Tensor& eos_token_id) {
+
     switch (logits.type()) {
         case paddle::DataType::BFLOAT16: {
             return token_penalty_multi_scores_kernel<paddle::DataType::BFLOAT16>(
@@ -198,8 +234,7 @@ std::vector<paddle::DataType> TokenPenaltyMultiScoresInferDtype(const paddle::Da
 }
 
 PD_BUILD_OP(get_token_penalty_multi_scores)
-    .Inputs({"pre_ids", "logits", "penalty_scores", "frequency_scores",
-			 "presence_scores", "cur_len", "min_len", "eos_token_id"})
+    .Inputs({"pre_ids", "logits", "penalty_scores", "frequency_scores", "presence_scores", "cur_len", "min_len", "eos_token_id"})
     .Outputs({"logits_out"})
     .SetKernelFn(PD_KERNEL(TokenPenaltyMultiScores))
     .SetInferShapeFn(PD_INFER_SHAPE(TokenPenaltyMultiScoresInferShape))

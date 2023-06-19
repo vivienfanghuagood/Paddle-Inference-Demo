@@ -1,4 +1,4 @@
-FILE(GLOB CUSTOM_OPERATOR_FILES *.cu *.cc)
+FILE(GLOB CUSTOM_OPERATOR_FILES *.cu *.cc *hpp)
 # set(CUSTOM_OPERATOR_FILES *.cu)
 
 project(pd_infer_custom_op)

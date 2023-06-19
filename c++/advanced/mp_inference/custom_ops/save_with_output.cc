@@ -102,7 +102,7 @@ void save_with_output_kernel(const paddle::Tensor& x,
 void print_shape(const paddle::Tensor& tmp, char *tmp_str){
     std::vector<int64_t> shape = tmp.shape();
     printf("%s's shape: \n", tmp_str);
-    for(size_t i=0; i < shape.size(); i++) {
+    for(int i=0; i < shape.size(); i++) {
         printf("%d ", (int)shape[i]);
     }
     printf("\n");
@@ -114,20 +114,19 @@ std::vector<paddle::Tensor> SaveWithOutputForward(const paddle::Tensor& x,
                                                   std::string file_path,
                                                   int64_t rank_id) {
     auto out = x.copy_to(paddle::CPUPlace(), false);
-    // switch(x.type()) {
-    //   // printf("x.type() %s",x.type());
-    //   case paddle::DataType::FLOAT32:
-    //      save_with_output_kernel<float>(out, batch_idx,step_idx, file_path,rank_id, '0');
-    //      break;
-    //   case paddle::DataType::INT64:
-    //     save_with_output_kernel<int64_t>(out, batch_idx,step_idx, file_path,rank_id,'1');
-    //      break;
-    //   case paddle::DataType::INT32:
-    //     save_with_output_kernel<int32_t>(out, batch_idx,step_idx, file_path,rank_id, '2');
-    //      break;
-    //   default:
-    //     PD_THROW("function SaveWithOutputForward is not implemented for data type");
-    // }
+    switch(x.type()) {
+      case paddle::DataType::FLOAT32:
+         save_with_output_kernel<float>(out, batch_idx, step_idx, file_path, rank_id, '0');
+         break;
+      case paddle::DataType::INT64:
+        save_with_output_kernel<int64_t>(out, batch_idx, step_idx, file_path, rank_id,'1');
+         break;
+      case paddle::DataType::INT32:
+        save_with_output_kernel<int32_t>(out, batch_idx, step_idx, file_path, rank_id, '2');
+         break;
+      default:
+        PD_THROW("function SaveWithOutputForward is not implemented for data type");
+    }
    return {out};                                                     
 }
 
