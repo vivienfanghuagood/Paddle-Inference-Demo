@@ -51,6 +51,11 @@ class TokenTransfer {
   void PushBatchToken(int64_t cur_batch_size, int64_t* cur_tokens) {
     std::lock_guard<std::mutex> mtx(mtx_);
     std::vector<int64_t> tmp(cur_tokens, cur_tokens + cur_batch_size);
+    // std::cout << "print out: ";
+    // for(int i=0; i< tmp.size(); ++i){
+    //   std::cout << tmp[i] << ", ";
+    // }
+    
     q_.emplace(cur_batch_size, tmp);
   }
 

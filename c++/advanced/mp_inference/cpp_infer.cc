@@ -38,6 +38,8 @@
 #include "paddle/include/paddle_tensor.h"
 // #include "paddle/include/experimental/phi/common/float16.h"
 
+#include "custom_ops/token_transfer.hpp"
+
 #include "cnpy.h"
 
 using paddle_infer::Config;
@@ -48,16 +50,28 @@ using paddle_infer::PlaceType;
 // using phi::dtype::float16;
 
 DEFINE_bool(use_multi_thread_inference, true, "whether use multi thread inference");
-DEFINE_string(dump_input, "./dump_input_dev.npz", "Directory of the dumped input npz file");
+DEFINE_string(dump_input, "./dump_input_who.npz", "Directory of the dumped input npz file");
 DEFINE_string(model_file, "", "Directory of the inference model.");
 DEFINE_string(params_file, "", "Directory of the inference model.");
 DEFINE_string(model_dir, "", "Directory of the inference model.");
-DEFINE_int32(max_batch, 20, "max_batch");
-DEFINE_int32(max_seq_len, 4000, "max_sequence_length");
+DEFINE_int32(max_batch, 1, "max_batch");
+DEFINE_int32(max_seq_len, 4096, "max_sequence_length");
 DEFINE_int32(layer_num, 80, "number layers");
 DEFINE_int32(ring_id, 0, "ring id");
 DEFINE_int32(dist_nrank, 1, "dist_nrank");
 DEFINE_int32(benchmark_time, 1, "the times of inference[used for benchmark only]");
+
+// temp test
+void PrintVec(int64_t *arr) {
+  VLOG(0) << "READ vec_size: " << arr[0];
+  std::string ss{};
+  for(int i {1}; i < arr[0] + 1; i++) {
+    ss += std::to_string(arr[i]) + ", ";
+    // VLOG(0) << " " << arr[i];
+  }
+  VLOG(0) << ss;
+  // std::cout << std::endl;
+}
 
 struct inference_attr {
     int rank;
@@ -107,55 +121,70 @@ void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1, infe
     auto input_tmp = predictor->GetInputHandle(name);
     auto input_tmp_shape = input_tmp->shape();
     cnpy::NpyArray arr_npy = input_npz[name];
+
+    std::vector<int> shape;
+    int numel {1};
+    for(size_t j = 0; j < arr_npy.shape.size(); ++j){
+      numel *= arr_npy.shape[j];
+      shape.emplace_back(arr_npy.shape[j]);
+      VLOG(0) <<  "[check shape]: " <<  arr_npy.shape[j];
+    }
     
-    
-    VLOG(3) <<  "[check input] input names:" <<  name;
+    VLOG(0) <<  "[check input] input names:" <<  name;
 
     if (name.find("cache_kv") != std::string::npos) {
        VLOG(3) <<  "[check input] load cache" <<  name;
-
       // 2 * FLAGS_max_batch * FLAGS_max_seq_len * 64 / FLAGS_dist_nrank * 128
       auto cache_buffer =  static_cast<bfloat16*>(args->shared_buffer_map[name]);
-      std::vector<int> shape {2, FLAGS_max_batch, 8, 4096, 128};
-      input_tmp->ShareExternalData<bfloat16>(cache_buffer, shape, PlaceType::kGPU);
-      // input_tmp->Reshape(shape);
+      std::vector<int> spec_shape {2, FLAGS_max_batch, 64 / FLAGS_dist_nrank, FLAGS_max_seq_len, 128};
+      input_tmp->ShareExternalData<bfloat16>(cache_buffer, spec_shape, PlaceType::kGPU);
       continue;
-    } else if (name.find("mask") != std::string::npos || name.find("position") != std::string::npos) {
-
-      // TODO
-    } else if (name.find("pre_id") != std::string::npos) {
+    } 
+    else if (name.find("position_ids") != std::string::npos) {
+      int64_t* position_id_buffer = nullptr;
+      cudaMalloc(&position_id_buffer, numel * sizeof(int64_t));
+      cudaMemcpy(position_id_buffer, arr_npy.data<int64_t>(), numel * sizeof(int64_t), cudaMemcpyHostToDevice);
+      input_tmp->ShareExternalData<int64_t>(position_id_buffer, shape, PlaceType::kGPU);
+      continue;
+    } 
+    else if (name.find("mask") != std::string::npos) {
+      bfloat16* mask_buffer = nullptr;
+      cudaMalloc(&mask_buffer, numel * sizeof(bfloat16));
+      cudaMemcpy(mask_buffer, arr_npy.data<bfloat16>(), numel * sizeof(bfloat16), cudaMemcpyHostToDevice);
+      input_tmp->ShareExternalData<bfloat16>(mask_buffer, shape, PlaceType::kGPU);
+      continue;
+    }
+    else if (name.find("pre_id") != std::string::npos) {
       long* pre_id_buffer = nullptr;
-      cudaMalloc((void **) &pre_id_buffer, FLAGS_max_batch * 4096 * sizeof(long));
+      long pre_count = FLAGS_max_batch * FLAGS_max_seq_len;
+      cudaMalloc((void **) &pre_id_buffer, pre_count * sizeof(long));
 
-      long* pre_id_buffer_cpu = new long[FLAGS_max_batch * 4096];
-      for(int jj=0; jj< FLAGS_max_batch * 4096; ++jj){
-        pre_id_buffer_cpu[jj] = 0;
+      long* pre_id_buffer_cpu = new long[pre_count];
+      for (int jj = 0; jj < pre_count; ++jj){
+        pre_id_buffer_cpu[jj] = -1;
       }
-      cudaMemcpy(pre_id_buffer, pre_id_buffer_cpu, FLAGS_max_batch * 4096, cudaMemcpyHostToDevice);
+      cudaMemcpy(pre_id_buffer, pre_id_buffer_cpu, pre_count, cudaMemcpyHostToDevice);
       delete pre_id_buffer_cpu;
 
-      std::vector<int> shape {FLAGS_max_batch, 4096};
+      std::vector<int> spec_shape {FLAGS_max_batch, FLAGS_max_seq_len};
       // input_tmp->Reshape(shape);
-      input_tmp->ShareExternalData<long>(pre_id_buffer, shape, PlaceType::kGPU);
+      input_tmp->ShareExternalData<long>(pre_id_buffer, spec_shape, PlaceType::kGPU);
       continue;
-    }
+    } 
     
-    std::vector<int> shape;
-    for(size_t j = 0; j < arr_npy.shape.size(); ++j){
-      shape.emplace_back(arr_npy.shape[j]);
-      VLOG(3) <<  "[check shape]: " <<  arr_npy.shape[j];
-    }
-    VLOG(3) <<  "[check dtype] : " << input_types[name];
-    input_tmp->Reshape(shape);
 
+    VLOG(0) <<  "[check dtype] : " << input_types[name];
+    input_tmp->Reshape(shape);
 
     if (input_types[name] == paddle_infer::DataType::FLOAT32){
       float* data = arr_npy.data<float>();
       input_tmp->CopyFromCpu(data);
     } else if (input_types[name] == paddle_infer::DataType::BFLOAT16){
-      void* data = arr_npy.data<void>();
-      input_tmp->CopyFromCpu(reinterpret_cast<bfloat16*>(data));
+      bfloat16* data = arr_npy.data<bfloat16>();
+      VLOG(0) <<  "[sample out] : " << data[0] << ", " << data[1] << ", " << data[2] << ", " << data[3];
+      input_tmp->CopyFromCpu(data);
     } else if (input_types[name] == paddle_infer::DataType::INT64){
+      
       long* data = arr_npy.data<long>();
       input_tmp->CopyFromCpu(data);
     } else if (input_types[name] == paddle_infer::DataType::INT32){
@@ -177,23 +206,35 @@ void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1, infe
     CHECK(predictor->Run());
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    VLOG(1) << "[BENCHMARK] ellapse " << elapsed.count() << "ms \n";
+    VLOG(0) << "[BENCHMARK] ellapse " << elapsed.count() << "ms \n";
   }
   VLOG(3) << "check run predictor finished";
 
-  if(rank == 0){
-    auto output_names = predictor->GetOutputNames();
-    auto output_t = predictor->GetOutputHandle(output_names[0]);
-    std::vector<int> output_shape = output_t->shape();
-    size_t shape_product = std::accumulate(output_shape.begin(), output_shape.end(), 1, std::multiplies<int>());
-    std::vector<int64_t>out_data(shape_product);
-    output_t->CopyToCpu(out_data.data());
-    std::cout << "print out\n";
-    for(size_t i=0; i< shape_product; ++i){
-        std::cout << out_data[i] << ", ";
+  if (rank == 0) {
+    using namespace paddle::inference::transfer;
+    VLOG(0) << "start print res";
+
+    int64_t get_token_test[20];
+    while (TokenTransfer::Instance().GetBatchToken(get_token_test)) {
+      PrintVec(get_token_test);
     }
-    std::cout << std::endl;
+    // TokenTransfer::Instance().GetBatchToken(get_token_test);
+    // PrintVec(get_token_test);
+    VLOG(0) << "end print res";
   }
+  // if(rank == 0){
+  //   auto output_names = predictor->GetOutputNames();
+  //   auto output_t = predictor->GetOutputHandle(output_names[3]);
+  //   std::vector<int> output_shape = output_t->shape();
+  //   size_t shape_product = std::accumulate(output_shape.begin(), output_shape.end(), 1, std::multiplies<int>());
+  //   std::vector<int>out_data(shape_product);
+  //   output_t->CopyToCpu(out_data.data());
+  //   std::cout << "print out\n";
+  //   for(size_t i=0; i< shape_product; ++i){
+  //       std::cout << out_data[i] << ", ";
+  //   }
+  //   std::cout << std::endl;
+  // }
 
   return;
 }

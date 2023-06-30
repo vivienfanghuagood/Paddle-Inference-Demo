@@ -16,7 +16,7 @@ WITH_GPU=ON
 USE_TENSORRT=OFF
 WITH_ONNXRUNTIME=OFF
 
-LIB_DIR=/root/paddlejob/workspace/output/fhq_0324/nccl_multithread/Paddle/build/paddle_inference_install_dir
+LIB_DIR=/root/paddlejob/workspace/output/lzc/muilti_thread/Paddle_new/build/paddle_inference_install_dir
 # LIB_DIR=/root/paddlejob/workspace/output/fhq_0324/nccl_multithread/bf16/Paddle/build/paddle_inference_install_dir
 CUDNN_LIB=/usr/lib/x86_64-linux-gnu/
 CUDA_LIB=/usr/local/cuda/lib64

@@ -58,6 +58,12 @@ std::vector<paddle::Tensor> GetStopFlagsMulti(const paddle::Tensor& topk_ids, co
     PD_CHECK(topk_ids.dtype() == paddle::DataType::INT64);
     PD_CHECK(stop_flags.dtype() == paddle::DataType::BOOL);
     
+    auto topk_ids_out_cpu = topk_ids.copy_to(paddle::CPUPlace(), false); // gpu -> cpu
+    auto cpu_ptr = topk_ids_out_cpu.data<int64_t>();
+    if (topk_ids.place().GetDeviceId() == 0) {
+        // std::cout << "!!!output topk ids: " << cpu_ptr[0] << std::endl;
+    }
+
     auto cu_stream = topk_ids.stream();
     std::vector<int64_t> shape = topk_ids.shape();
     int64_t bs_now = shape[0];
@@ -65,7 +71,7 @@ std::vector<paddle::Tensor> GetStopFlagsMulti(const paddle::Tensor& topk_ids, co
     auto topk_ids_out = topk_ids.copy_to(topk_ids.place(), false); // gpu -> gpu
     auto stop_flags_out = stop_flags.copy_to(stop_flags.place(), false); // gpu -> gpu
     if (mode == 0 || mode == 1) {
-        constexpr char *path = "/root/paddlejob/workspace/env_run/lzy/ERNIE_ALL/early_stop/ERNIE3.0-fused-fp16/ops/test";
+        constexpr char *path = "/tmp/test";
         auto flags = paddle::full({bs_now, 1}, 1, paddle::DataType::BOOL, paddle::CPUPlace());
         int fd = -1;
         int ret = -1;
