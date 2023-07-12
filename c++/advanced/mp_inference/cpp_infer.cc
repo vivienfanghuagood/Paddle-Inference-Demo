@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <iostream>
@@ -22,25 +23,35 @@
 #include <sstream>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <pthread.h>
 #include <thread>
 #include <sstream>
 #include <stdexcept>
 
+#include<sys/stat.h>
+#include<unistd.h>
+#include<fcntl.h>
+#include<sys/mman.h>
+
 #include <cuda_runtime.h>
 
 #include "gflags/gflags.h"
 #include "glog/logging.h"
-
+#include <sched.h> 
+#include <stdlib.h>
 // #include "paddle/include/experimental/phi/common/bfloat16.h"
 #include "paddle/phi/common/bfloat16.h"
 #include "paddle/include/paddle_inference_api.h"
 #include "paddle/include/paddle_tensor.h"
 // #include "paddle/include/experimental/phi/common/float16.h"
 
-#include "custom_ops/token_transfer.hpp"
+#include <stdlib.h>
+#include <dlfcn.h>
 
+#include "custom_ops/token_transfer.hpp"
 #include "cnpy.h"
+#include "inference_helper.hpp"
 
 using paddle_infer::Config;
 using paddle_infer::CreatePredictor;
@@ -61,6 +72,7 @@ DEFINE_int32(ring_id, 0, "ring id");
 DEFINE_int32(dist_nrank, 1, "dist_nrank");
 DEFINE_int32(benchmark_time, 1, "the times of inference[used for benchmark only]");
 
+std::atomic<int> finish_flag = {0};
 // temp test
 void PrintVec(int64_t *arr) {
   VLOG(0) << "READ vec_size: " << arr[0];
@@ -90,9 +102,10 @@ std::shared_ptr<Predictor> InitPredictor(std::string model_path, std::string par
 
   config.SetModel(model_path, params_path);
   // int device_id = rank >= 0? rank : 0;
-  config.EnableUseGpu(100, device_id);
-  config.EnableMemoryOptim();
+  config.EnableUseGpu(50, device_id);
+  // config.EnableMemoryOptim();
   config.SwitchIrOptim(true);
+  // config.EnableProfile();
   config.SetCpuMathLibraryNumThreads(1);
   if (device_id == 0){
     VLOG(0) << "[multi_thread] " << "device_id 0 ";
@@ -129,6 +142,8 @@ void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1, infe
       shape.emplace_back(arr_npy.shape[j]);
       VLOG(0) <<  "[check shape]: " <<  arr_npy.shape[j];
     }
+    //numel = numel * FLAGS_max_batch / shape[0];
+    //shape[0] = FLAGS_max_batch;
     
     VLOG(0) <<  "[check input] input names:" <<  name;
 
@@ -202,6 +217,20 @@ void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1, infe
 
   for (int i = 0; i < FLAGS_benchmark_time; i++) {
     // predictor->ExpRunWithExternalStream(comm_0.stream());
+    // if(i < 2){
+    //   VLOG(1) << "start set value: ";
+    //   setenv("NCCL_LAUNCH_MODE", "GROUP", 1);
+    // }
+    // else{
+    //   VLOG(1) << "start set value: ";
+    //   setenv("NCCL_LAUNCH_MODE", "PARALLEL", 1);
+    // }
+
+    // auto* envs = getenv("NCCL_LAUNCH_MODE");
+
+    // VLOG(1) << "set value: " << envs;
+    // char get_v = get_mmap_value();
+    // 
     auto start = std::chrono::system_clock::now();
     CHECK(predictor->Run());
     auto end = std::chrono::system_clock::now();
@@ -240,7 +269,16 @@ void run_predict(Predictor *predictor, cnpy::npz_t& input_npz, int rank=-1, infe
 }
 
 void *thread_fn(void *args) {
+  
+
     struct inference_attr *targs = (struct inference_attr *)args;
+
+    cpu_set_t cpuset; 
+    int cpu = targs->device_id;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu , &cpuset);
+    sched_setaffinity(0, sizeof(cpuset), &cpuset);
+
     // int rank = targs->rank;
     int device_id = targs->device_id;
     int32_t thread_idx = targs->thread_idx;
@@ -252,6 +290,10 @@ void *thread_fn(void *args) {
     VLOG(3) << "Thread:" << thread_idx << "  params_file: " << params_file ;
 
     auto predictor = InitPredictor(model_file, params_file, device_id, cuda_stream);
+    finish_flag++;
+    while(finish_flag.load() < 8){
+        std::this_thread::sleep_for (std::chrono::seconds(1));
+    }
 
     if (predictor == nullptr){
         LOG(ERROR) << "Thread:" << thread_idx << "init predictor failed";
@@ -266,6 +308,9 @@ void *thread_fn(void *args) {
 
 int main(int argc, char *argv[]) {
 
+  // warm_up();
+
+  dlopen("./build/custom_ops/libpd_infer_custom_op.so", RTLD_NOW);
   google::ParseCommandLineFlags(&argc, &argv, true);
   std::vector<int> dev_ids{0,1,2,3,4,5,6,7};
 

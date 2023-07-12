@@ -195,7 +195,7 @@ include_directories("/usr/local/cuda/include/")
 add_subdirectory(custom_ops)
 
 add_executable(${DEMO_NAME} ${DEMO_NAME}.cc)
-set(DEPS ${DEPS} pd_infer_custom_op)
+# set(DEPS ${DEPS} pd_infer_custom_op)
 set(DEPS ${DEPS} cnpy ssl crypto)
 
 if(WIN32)
